@@ -1,0 +1,13 @@
+# Environment
+.env
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Reports (will add later)
+reports/
+*.swp
