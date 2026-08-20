@@ -20,93 +20,172 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-SCREENING_CRITERIA = {
-    "max_rsi": 35,          # Oversold threshold
-    "min_price": 10.0,      # No penny stocks
-    "min_market_cap": 500_000_000,  # $500M minimum market cap
-    "max_candidates": 15,   # How many to deep-dive on
+# ── Screening modes ──────────────────────────────────────────────────────────
+
+SCREENING_MODES = {
+    "oversold": {
+        "label": "Oversold Bounce Candidates",
+        "description": "RSI < 35 — beaten down stocks that may revert",
+        "candidates_per_mode": 8,
+    },
+    "momentum": {
+        "label": "Momentum Leaders",
+        "description": "RSI > 60 and price above MA50 — strong uptrends",
+        "candidates_per_mode": 8,
+    },
+    "breakout": {
+        "label": "Breakout Candidates",
+        "description": "Within 3% of 52-week high with RSI 50-70",
+        "candidates_per_mode": 8,
+    },
+    "value": {
+        "label": "Value / Mean Reversion",
+        "description": "Price below MA200 with above-average volume",
+        "candidates_per_mode": 6,
+    },
 }
 
-# ── Stage 1: Fast bulk screener ──────────────────────────────────────────────
+BASE_FILTERS = {
+    "min_price": 10.0,
+    "min_market_cap": 500_000_000,
+}
+
+MAX_DEEP_ANALYSIS = 20  # Total tickers across all modes
+
+
+# ── Stage 1: Multi-mode bulk screener ────────────────────────────────────────
 
 def bulk_screen(tickers: list[str]) -> list[dict]:
     """
-    Loops through all tickers and applies fast filters.
-    Only fetches 1 month of price data per ticker to keep it quick.
-    Returns a shortlist of candidates sorted by RSI ascending.
+    Single pass through all tickers, scoring each against all four
+    screening modes simultaneously. Returns a combined shortlist.
     """
-    candidates = []
+    results = {mode: [] for mode in SCREENING_MODES}
     total = len(tickers)
     start_time = time.time()
 
     print(f"\n{'='*60}")
-    print(f"STAGE 1: Screening {total} tickers")
-    print(f"Criteria: RSI < {SCREENING_CRITERIA['max_rsi']}, "
-          f"Price > ${SCREENING_CRITERIA['min_price']}, "
-          f"Market Cap > ${SCREENING_CRITERIA['min_market_cap']:,}")
+    print(f"STAGE 1: Multi-mode screen across {total} tickers")
+    print(f"Modes: {', '.join(SCREENING_MODES.keys())}")
+    print(f"Base filters: Price > ${BASE_FILTERS['min_price']}, "
+          f"Market Cap > ${BASE_FILTERS['min_market_cap']:,}")
     print(f"{'='*60}\n")
 
     for i, ticker in enumerate(tickers):
-        # Progress update every 500 tickers
         if i % 500 == 0 and i > 0:
             elapsed = time.time() - start_time
             rate = i / elapsed
             remaining = (total - i) / rate
-            print(f"  Progress: {i}/{total} tickers scanned | "
-                  f"{len(candidates)} candidates so far | "
+            counts = {m: len(v) for m, v in results.items()}
+            print(f"  Progress: {i}/{total} | {counts} | "
                   f"~{remaining/60:.1f} mins remaining")
 
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="1mo", auto_adjust=True)
+            hist = stock.history(period="3mo", auto_adjust=True)
 
-            if hist.empty or len(hist) < 15:
+            if hist.empty or len(hist) < 30:
                 continue
 
-            # Price filter
-            current_price = float(hist["Close"].iloc[-1])
-            if current_price < SCREENING_CRITERIA["min_price"]:
+            closes = hist["Close"]
+            volumes = hist["Volume"]
+
+            current_price = float(closes.iloc[-1])
+            if current_price < BASE_FILTERS["min_price"]:
                 continue
 
-            # RSI calculation
-            delta = hist["Close"].diff()
+            # RSI (14-day)
+            delta = closes.diff()
             gain = delta.clip(lower=0).rolling(window=14).mean()
             loss = -delta.clip(upper=0).rolling(window=14).mean()
             rs = gain / loss
             rsi_series = 100 - (100 / (1 + rs))
             rsi = float(rsi_series.iloc[-1])
-
-            if pd.isna(rsi) or rsi > SCREENING_CRITERIA["max_rsi"]:
+            if pd.isna(rsi):
                 continue
 
-            # Market cap filter (quick info fetch)
+            # Moving averages
+            ma50 = float(closes.rolling(window=50).mean().iloc[-1]) if len(closes) >= 50 else None
+            ma200 = float(closes.rolling(window=200).mean().iloc[-1]) if len(closes) >= 200 else None
+
+            # 52-week high (from 3mo data — approximate)
+            high_52w = float(closes.max())
+
+            # Volume — is today's volume above 20-day average?
+            avg_volume = float(volumes.rolling(window=20).mean().iloc[-1])
+            volume_today = float(volumes.iloc[-1])
+            volume_spike = volume_today > (avg_volume * 1.5)
+
+            # Market cap filter
             info = stock.info
             market_cap = info.get("marketCap") or 0
-            if market_cap < SCREENING_CRITERIA["min_market_cap"]:
+            if market_cap < BASE_FILTERS["min_market_cap"]:
                 continue
 
-            candidates.append({
+            name = info.get("longName") or info.get("shortName", ticker)
+            sector = info.get("sector")
+
+            base = {
                 "ticker": ticker,
-                "name": info.get("longName") or info.get("shortName", ticker),
-                "sector": info.get("sector"),
+                "name": name,
+                "sector": sector,
                 "current_price": round(current_price, 2),
                 "rsi": round(rsi, 2),
                 "market_cap": market_cap,
-            })
+            }
+
+            # ── Mode 1: Oversold ──
+            if rsi < 35:
+                results["oversold"].append({**base, "signal": f"RSI {rsi:.1f} — oversold"})
+
+            # ── Mode 2: Momentum ──
+            if rsi > 60 and ma50 and current_price > ma50:
+                results["momentum"].append({**base, "signal": f"RSI {rsi:.1f}, price above MA50"})
+
+            # ── Mode 3: Breakout ──
+            if ma50 and 50 < rsi < 70:
+                pct_from_high = (high_52w - current_price) / high_52w
+                if pct_from_high <= 0.03:
+                    results["breakout"].append({
+                        **base,
+                        "signal": f"Within {pct_from_high*100:.1f}% of 52w high, RSI {rsi:.1f}"
+                    })
+
+            # ── Mode 4: Value / Mean Reversion ──
+            if ma200 and current_price < ma200 and volume_spike:
+                results["value"].append({
+                    **base,
+                    "signal": f"Below MA200, volume {volume_today/avg_volume:.1f}x average"
+                })
 
         except Exception:
-            continue  # Skip anything that errors
+            continue
 
-    # Sort by RSI ascending (most oversold first)
-    candidates.sort(key=lambda x: x["rsi"])
-    top = candidates[:SCREENING_CRITERIA["max_candidates"]]
+    # Take top N per mode, sort by RSI appropriately
+    combined = []
+    for mode, candidates in results.items():
+        limit = SCREENING_MODES[mode]["candidates_per_mode"]
+        if mode == "oversold":
+            candidates.sort(key=lambda x: x["rsi"])  # Most oversold first
+        elif mode == "momentum":
+            candidates.sort(key=lambda x: -x["rsi"])  # Highest RSI first
+        elif mode in ("breakout", "value"):
+            candidates.sort(key=lambda x: -x["market_cap"])  # Largest first
+
+        top = candidates[:limit]
+        for c in top:
+            c["mode"] = mode
+            # Avoid duplicates across modes
+            if not any(existing["ticker"] == c["ticker"] for existing in combined):
+                combined.append(c)
 
     elapsed_mins = (time.time() - start_time) / 60
     print(f"\n✓ Screening complete in {elapsed_mins:.1f} mins")
-    print(f"  Found {len(candidates)} candidates matching criteria")
-    print(f"  Taking top {len(top)} for deep analysis\n")
+    for mode, candidates in results.items():
+        print(f"  {SCREENING_MODES[mode]['label']}: {len(candidates)} found")
+    print(f"  Combined shortlist: {len(combined)} unique tickers\n")
 
-    return top
+    return combined[:MAX_DEEP_ANALYSIS]
 
 # ── Stage 2: Deep analysis ───────────────────────────────────────────────────
 
@@ -164,12 +243,14 @@ def deep_analyze(candidates: list[dict]) -> list[dict]:
 SYNTHESIS_PROMPT = """
 You are a professional equity research analyst producing a daily morning brief.
 
-You have been given deep analysis data for a set of stocks that passed an 
-overnight screen (RSI < 35, price > $10, market cap > $500M). Your job is 
-to synthesize this data into a concise, actionable morning report.
+You have been given deep analysis data for stocks that passed an overnight 
+multi-mode screen. Each ticker has a "mode" field indicating which screen 
+surfaced it:
 
-For each ticker you have: current price, RSI, moving averages, recent news 
-headlines, P/E ratio, EPS, analyst target price, and analyst recommendation.
+- oversold: RSI < 35, potential bounce plays
+- momentum: RSI > 60 and above MA50, strong uptrends  
+- breakout: within 3% of 52-week high, RSI 50-70
+- value: price below MA200 with volume spike
 
 Produce a report in this exact format:
 
@@ -178,26 +259,30 @@ Produce a report in this exact format:
 ═══════════════════════════════════════════════════════════
 
 MARKET OVERVIEW
-[2-3 sentences on what the screen results suggest about the 
-broader market environment today]
+[3-4 sentences — what does the distribution of signals across 
+modes tell you about today's market environment? Are we seeing 
+broad oversold conditions, momentum continuation, breakouts, etc?]
 
-TOP PICKS
+OVERSOLD BOUNCE PLAYS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[For each of your top 3-5 picks, include:]
-[Rank]. [TICKER] — [BUY/HOLD/AVOID] | [High/Medium/Low] Conviction
-Company: [Name] | Sector: [Sector]
-Price: $[X] | RSI: [X] | Analyst Target: $[X]
-Thesis: [2-3 sentences — why this is interesting right now]
-Key Risk: [1 sentence]
+[Top 2-3 oversold picks with: ticker, action, conviction, 
+price, RSI, analyst target, 2-sentence thesis, key risk]
 
-TICKERS TO WATCH (but not buy yet)
+MOMENTUM PLAYS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[2-3 tickers from the screened list that need more confirmation
-before buying — briefly explain why]
+[Top 2-3 momentum picks — same format]
+
+BREAKOUT WATCH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[Top 2-3 breakout candidates — same format]
+
+VALUE / MEAN REVERSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[Top 2 value plays — same format]
 
 PASS (do not buy)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[Remaining tickers with one-line reason to pass]
+[Any screened tickers not worth acting on — one line each]
 
 RISKS TO WATCH TODAY
 [2-3 macro or sector risks relevant to today's picks]
@@ -205,7 +290,7 @@ RISKS TO WATCH TODAY
 ═══════════════════════════════════════════════════════════
 
 Be direct and specific. Reference actual numbers. Never fabricate data.
-If analyst target or recommendation is null, note it and work around it.
+If a section has no candidates, write 'No signals today.'
 """
 
 def synthesize_report(analyzed: list[dict]) -> str:
