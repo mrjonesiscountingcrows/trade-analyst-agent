@@ -3,7 +3,7 @@ from agent import run_agent
 if __name__ == "__main__":
     # Try a few different queries to see the agent in action
     queries = [
-        "What healthcare stocks look undervalued right now?",
+        "Are there any energy stocks with strong fundamentals worth buying?",
     ]
 
     for query in queries:

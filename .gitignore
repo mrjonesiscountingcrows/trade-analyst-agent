@@ -11,3 +11,5 @@ __pycache__/
 # Reports (will add later)
 reports/
 *.swp
+cache/
+rerun_stage2.py
