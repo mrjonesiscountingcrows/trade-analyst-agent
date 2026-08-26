@@ -71,6 +71,10 @@ def bulk_screen(tickers: list[str]) -> list[dict]:
           f"Market Cap > ${BASE_FILTERS['min_market_cap']:,}")
     print(f"{'='*60}\n")
 
+    import random
+    random.shuffle(tickers)
+    print(f"  Ticker order randomized — alphabet bias eliminated\n")
+
     for i, ticker in enumerate(tickers):
         if i % 500 == 0 and i > 0:
             elapsed = time.time() - start_time
@@ -82,7 +86,7 @@ def bulk_screen(tickers: list[str]) -> list[dict]:
 
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="3mo", auto_adjust=True)
+            hist = stock.history(period="12mo", auto_adjust=True)
 
             if hist.empty or len(hist) < 30:
                 continue
@@ -94,6 +98,15 @@ def bulk_screen(tickers: list[str]) -> list[dict]:
             if current_price < BASE_FILTERS["min_price"]:
                 continue
 
+            # Skip foreign OTC stocks — these end in F or Y and have
+            # unreliable data; we want proper US-listed equities
+            if ticker.endswith("F") or ticker.endswith("Y"):
+                continue
+
+            # Skip tickers longer than 4 chars — usually OTC or special issues
+            if len(ticker) > 4:
+                continue
+
             # RSI (14-day)
             delta = closes.diff()
             gain = delta.clip(lower=0).rolling(window=14).mean()
@@ -102,6 +115,10 @@ def bulk_screen(tickers: list[str]) -> list[dict]:
             rsi_series = 100 - (100 / (1 + rs))
             rsi = float(rsi_series.iloc[-1])
             if pd.isna(rsi):
+                continue
+
+            # Guard against bad RSI data (0.0 or 100.0 are artifacts)
+            if rsi < 5 or rsi > 98:
                 continue
 
             # Moving averages
@@ -158,32 +175,47 @@ def bulk_screen(tickers: list[str]) -> list[dict]:
                     "signal": f"Below MA200, volume {volume_today/avg_volume:.1f}x average"
                 })
 
+            time.sleep(0.05)  # 50ms pause — keeps us under Yahoo Finance rate limit
+
         except Exception:
             continue
-
-    # Take top N per mode, sort by RSI appropriately
-    combined = []
-    for mode, candidates in results.items():
-        limit = SCREENING_MODES[mode]["candidates_per_mode"]
-        if mode == "oversold":
-            candidates.sort(key=lambda x: x["rsi"])  # Most oversold first
-        elif mode == "momentum":
-            candidates.sort(key=lambda x: -x["rsi"])  # Highest RSI first
-        elif mode in ("breakout", "value"):
-            candidates.sort(key=lambda x: -x["market_cap"])  # Largest first
-
-        top = candidates[:limit]
-        for c in top:
-            c["mode"] = mode
-            # Avoid duplicates across modes
-            if not any(existing["ticker"] == c["ticker"] for existing in combined):
-                combined.append(c)
 
     elapsed_mins = (time.time() - start_time) / 60
     print(f"\n✓ Screening complete in {elapsed_mins:.1f} mins")
     for mode, candidates in results.items():
-        print(f"  {SCREENING_MODES[mode]['label']}: {len(candidates)} found")
-    print(f"  Combined shortlist: {len(combined)} unique tickers\n")
+        print(f"  {SCREENING_MODES[mode]['label']}: {len(candidates)} total found")
+
+    # Now that the full universe is scanned, rank each mode properly
+    # and pick the best across the full alphabet — not first-found
+    combined = []
+    for mode, candidates in results.items():
+        limit = SCREENING_MODES[mode]["candidates_per_mode"]
+
+        if mode == "oversold":
+            # Most oversold (lowest RSI) first
+            candidates.sort(key=lambda x: x["rsi"])
+        elif mode == "momentum":
+            # Strongest momentum (highest RSI) first
+            candidates.sort(key=lambda x: -x["rsi"])
+        elif mode == "breakout":
+            # Closest to 52w high first — need to store pct_from_high
+            # Fall back to market cap for now
+            candidates.sort(key=lambda x: -x["market_cap"])
+        elif mode == "value":
+            # Largest companies with volume spike first
+            candidates.sort(key=lambda x: -x["market_cap"])
+
+        top = candidates[:limit]
+        print(f"  → Top {len(top)} for deep analysis: "
+              f"{[c['ticker'] for c in top]}")
+
+        for c in top:
+            c["mode"] = mode
+            if not any(existing["ticker"] == c["ticker"] for existing in combined):
+                combined.append(c)
+
+    print(f"\n  Combined shortlist: {len(combined)} unique tickers")
+    print(f"  Tickers: {[c['ticker'] for c in combined]}\n")
 
     return combined[:MAX_DEEP_ANALYSIS]
 
@@ -195,10 +227,10 @@ def deep_analyze(candidates: list[dict]) -> list[dict]:
     """
     print(f"{'='*60}")
     print(f"STAGE 2: Deep analysis on {len(candidates)} candidates")
-    print(f"Pausing 60 seconds to let Yahoo Finance rate limit recover...")
+    print(f"Pausing 3 minutes to let Yahoo Finance rate limit recover...")
     print(f"{'='*60}\n")
 
-    time.sleep(60)  # Let the rate limit recover after bulk screening
+    time.sleep(180)  # Let the rate limit recover after bulk screening
 
     analyzed = []
 
