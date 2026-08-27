@@ -13,3 +13,4 @@ reports/
 *.swp
 cache/
 rerun_stage2.py
+logs/*.json

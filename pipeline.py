@@ -393,6 +393,65 @@ def load_candidates() -> list[dict] | None:
         return candidates
     return None
 
+def log_recommendations(report: str, analyzed: list[dict], date_str: str):
+    """
+    Parses the agent's report and saves structured recommendation records
+    to a JSON log file for later backtesting.
+    """
+    import re
+
+    os.makedirs("logs", exist_ok=True)
+    log_path = f"logs/{date_str}_recommendations.json"
+
+    # Build a price lookup from analyzed data
+    prices = {
+        item["ticker"]: item["price_data"].get("current_price")
+        for item in analyzed
+        if item.get("price_data")
+    }
+
+    # Simple regex to extract BUY/HOLD/SELL/AVOID actions from the report
+    records = []
+    action_pattern = re.compile(
+        r'\*{0,2}([A-Z]{1,5})\*{0,2}.*?Action.*?:\s*\*{0,2}(Buy|Hold|Sell|Avoid|Watch|Strong Buy|Speculative Buy)',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    seen = set()
+    for match in action_pattern.finditer(report):
+        ticker = match.group(1).strip()
+        action = match.group(2).strip().lower()
+
+        if ticker in seen or ticker not in prices:
+            continue
+        seen.add(ticker)
+
+        # Normalize action to buy/hold/sell
+        if any(x in action for x in ["buy", "strong"]):
+            normalized = "buy"
+        elif "sell" in action or "avoid" in action:
+            normalized = "sell"
+        else:
+            normalized = "hold"
+
+        records.append({
+            "date": date_str,
+            "ticker": ticker,
+            "action": normalized,
+            "raw_action": match.group(2).strip(),
+            "price_at_recommendation": prices.get(ticker),
+            "outcome_date": None,       # filled in by backtest.py
+            "price_at_outcome": None,   # filled in by backtest.py
+            "return_pct": None,         # filled in by backtest.py
+            "correct": None,            # filled in by backtest.py
+        })
+
+    with open(log_path, "w") as f:
+        json.dump(records, f, indent=2)
+
+    print(f"  Logged {len(records)} recommendations to: {log_path}")
+    return records
+
 if __name__ == "__main__":
     overall_start = time.time()
 
@@ -417,6 +476,8 @@ if __name__ == "__main__":
 
     # Save and display
     filepath = save_report(report)
+    date_str = datetime.today().strftime("%Y-%m-%d")
+    log_recommendations(report, analyzed, date_str)
 
     total_mins = (time.time() - overall_start) / 60
     print(f"\n✓ Pipeline complete in {total_mins:.1f} mins")
