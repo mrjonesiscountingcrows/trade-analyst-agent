@@ -413,7 +413,7 @@ def log_recommendations(report: str, analyzed: list[dict], date_str: str):
     # Simple regex to extract BUY/HOLD/SELL/AVOID actions from the report
     records = []
     action_pattern = re.compile(
-        r'\d+\.\s+\*\*([A-Z]{1,5}).*?\*\*\s*\n\s+-\s+Action:\s*([\w\s]+)',
+        r'\d+\.\s+\*{0,2}([A-Z]{1,5})[\s\-\*\(].*?\n\s+[-\*]?\s*Action:\s*([\w\s]+)',
         re.MULTILINE
     )
 

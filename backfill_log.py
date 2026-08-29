@@ -27,8 +27,8 @@ with open(REPORT_PATH, "r") as f:
 print(f"\nReading report: {REPORT_PATH}\n")
 
 pattern = re.compile(
-    r'\d+\.\s+\*\*([A-Z]{1,5}).*?\*\*\s*\n\s+-\s+Action:\s*([\w\s]+)',
-    re.MULTILINE
+        r'\d+\.\s+\*{0,2}([A-Z]{1,5})[\s\-\*\(].*?\n\s+[-\*]?\s*Action:\s*([\w\s]+)',
+        re.MULTILINE
 )
 
 seen = set()
